@@ -96,10 +96,6 @@ impl IsUnlocked for AF9 {}
 pub struct AF14;
 impl IsUnlocked for AF14 {}
 
-/// Alternate function 15 (type state)
-pub struct AF15;
-impl IsUnlocked for AF15 {}
-
 /// Pin is locked through the GPIOCR register
 pub struct Locked;
 
@@ -457,25 +453,6 @@ macro_rules! gpio {
                         let bits = 0xE << ($i * 4);
                         unsafe {
                             p.pctl.modify(|r, w| w.bits((r.bits() & !mask) | bits));
-                        }
-                        unsafe { bb::change_bit(&p.afsel, $i, true); }
-                        unsafe { bb::change_bit(&p.dir, $i, false); }
-                        unsafe { bb::change_bit(&p.odr, $i, false); }
-                        unsafe { bb::change_bit(&p.pur, $i, false); }
-                        unsafe { bb::change_bit(&p.pdr, $i, false); }
-                        unsafe { bb::change_bit(&p.den, $i, true); }
-                        $PXi { _mode: PhantomData }
-                    }
-
-                    /// Configures the pin to serve as alternate function 15 (AF15)
-                    pub fn into_af15(
-                        self,
-                        _gpio_control: &mut GpioControl,
-                    ) -> $PXi<AF15> {
-                        let p = unsafe { &*$GPIOX::ptr() };
-                        let bits = 0xF << ($i * 4);
-                        unsafe {
-                            p.pctl.modify(|r, w| w.bits(r.bits() | bits));
                         }
                         unsafe { bb::change_bit(&p.afsel, $i, true); }
                         unsafe { bb::change_bit(&p.dir, $i, false); }
