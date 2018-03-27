@@ -311,7 +311,6 @@ macro_rules! gpio {
                     /// Configures the pin to serve as alternate function 2 (AF2)
                     pub fn into_af2(
                         self,
-                        _gpio_control: &mut GpioControl,
                     ) -> $PXi<AF2> {
                         let p = unsafe { &*$GPIOX::ptr() };
                         let mask = 0xF << ($i * 4);

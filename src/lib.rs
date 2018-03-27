@@ -35,10 +35,10 @@ pub mod delay;
 // pub mod flash;
 pub mod gpio;
 pub mod i2c;
+pub mod spi;
 // pub mod prelude;
 pub mod sysctl;
 pub mod serial;
-// pub mod spi;
 pub mod time;
 // pub mod timer;
 
