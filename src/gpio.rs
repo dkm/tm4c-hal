@@ -60,8 +60,11 @@ pub struct AF2;
 impl IsUnlocked for AF2 {}
 
 /// Alternate function 3 (type state)
-pub struct AF3;
-impl IsUnlocked for AF3 {}
+pub struct AF3<MODE> {
+    _mode: PhantomData<MODE>,
+}
+
+impl<MODE> IsUnlocked for AF3<MODE> {}
 
 /// Alternate function 4 (type state)
 pub struct AF4;
@@ -325,26 +328,6 @@ macro_rules! gpio {
                         $PXi { _mode: PhantomData }
                     }
 
-                    /// Configures the pin to serve as alternate function 3 (AF3)
-                    pub fn into_af3(
-                        self,
-                        _gpio_control: &mut GpioControl,
-                    ) -> $PXi<AF3> {
-                        let p = unsafe { &*$GPIOX::ptr() };
-                        let mask = 0xF << ($i * 4);
-                        let bits = 0x3 << ($i * 4);
-                        unsafe {
-                            p.pctl.modify(|r, w| w.bits((r.bits() & !mask) | bits));
-                        }
-                        unsafe { bb::change_bit(&p.afsel, $i, true); }
-                        unsafe { bb::change_bit(&p.dir, $i, false); }
-                        unsafe { bb::change_bit(&p.odr, $i, false); }
-                        unsafe { bb::change_bit(&p.pur, $i, false); }
-                        unsafe { bb::change_bit(&p.pdr, $i, false); }
-                        unsafe { bb::change_bit(&p.den, $i, true); }
-                        $PXi { _mode: PhantomData }
-                    }
-
                     /// Configures the pin to serve as alternate function 4 (AF4)
                     pub fn into_af4(
                         self,
@@ -497,6 +480,45 @@ macro_rules! gpio {
                         }
                         unsafe { bb::change_bit(&p.afsel, $i, true); }
                         unsafe { bb::change_bit(&p.dir, $i, false); }
+                        unsafe { bb::change_bit(&p.odr, $i, false); }
+                        unsafe { bb::change_bit(&p.pur, $i, false); }
+                        unsafe { bb::change_bit(&p.pdr, $i, false); }
+                        unsafe { bb::change_bit(&p.den, $i, true); }
+                        $PXi { _mode: PhantomData }
+                    }
+
+                    /// Configures the pin to operate as an open drain af3 pin
+                    pub fn into_open_drain_af3(
+                        self
+                    ) -> $PXi<AF3<Output<OpenDrain>>> {
+                        let p = unsafe { &*$GPIOX::ptr() };
+                        let mask = 0xF << ($i * 4);
+                        let bits = 0x3 << ($i * 4);
+                        unsafe {
+                            p.pctl.modify(|r, w| w.bits((r.bits() & !mask) | bits));
+                        }
+                        unsafe { bb::change_bit(&p.afsel, $i, true); }
+                        unsafe { bb::change_bit(&p.dir, $i, true); }
+                        unsafe { bb::change_bit(&p.odr, $i, true); }
+                        unsafe { bb::change_bit(&p.pur, $i, false); }
+                        unsafe { bb::change_bit(&p.pdr, $i, false); }
+                        unsafe { bb::change_bit(&p.den, $i, true); }
+                        $PXi { _mode: PhantomData }
+                    }
+
+                    /// Configures the pin to operate as an pushpull af3 pin
+                    pub fn into_push_pull_af3(
+                        self
+                    ) -> $PXi<AF3<Output<PushPull>>> {
+                        let p = unsafe { &*$GPIOX::ptr() };
+                        let mask = 0xF << ($i * 4);
+                        let bits = 0x3 << ($i * 4);
+                        unsafe {
+                            p.pctl.modify(|r, w| w.bits((r.bits() & !mask) | bits));
+                        }
+
+                        unsafe { bb::change_bit(&p.afsel, $i, true); }
+                        unsafe { bb::change_bit(&p.dir, $i, true); }
                         unsafe { bb::change_bit(&p.odr, $i, false); }
                         unsafe { bb::change_bit(&p.pur, $i, false); }
                         unsafe { bb::change_bit(&p.pdr, $i, false); }

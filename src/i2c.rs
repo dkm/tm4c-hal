@@ -1,14 +1,18 @@
 //! Inter-Integrated Circuit (I2C) bus
 
-use cast::u8;
-use tm4c123x::{I2C1, I2C2};
+use tm4c123x::{I2C0, I2C1, I2C2, I2C3};
 
-use gpio::gpioa::{PA10, PA9};
-use gpio::gpiob::{PB6, PB7, PB8, PB9};
-use gpio::gpiof::{PF0, PF1, PF6};
-use gpio::AF4;
-use hal::blocking::i2c::{Write, WriteRead};
-use rcc::{APB1, Clocks};
+use gpio::gpioa::{PA6, PA7};
+use gpio::gpiob::{PB2, PB3};
+use gpio::gpioe::{PE4, PE5};
+use gpio::gpiod::{PD0, PD1};
+
+use gpio::{AF3, Output, OpenDrain, PushPull};
+
+use sysctl::Clocks;
+use sysctl;
+
+use hal::blocking::i2c::{Write, WriteRead, Read};
 use time::Hertz;
 
 /// I2C error
@@ -18,10 +22,13 @@ pub enum Error {
     Bus,
     /// Arbitration loss
     Arbitration,
-    // Overrun, // slave mode only
-    // Pec, // SMBUS mode only
-    // Timeout, // SMBUS mode only
-    // Alert, // SMBUS mode only
+
+    /// Missing Data ACK
+    DataAck,
+
+    /// Missing Addrees ACK
+    AdrAck,
+
     #[doc(hidden)] _Extensible,
 }
 
@@ -32,20 +39,17 @@ pub unsafe trait SclPin<I2C> {}
 /// SDA pin -- DO NOT IMPLEMENT THIS TRAIT
 pub unsafe trait SdaPin<I2C> {}
 
-// unsafe impl SclPin<I2C1> for PA15<AF4> {}
-unsafe impl SclPin<I2C1> for PB6<AF4> {}
-unsafe impl SclPin<I2C1> for PB8<AF4> {}
+unsafe impl SclPin<I2C0> for PB2<AF3<Output<PushPull>>> {}
+unsafe impl SdaPin<I2C0> for PB3<AF3<Output<OpenDrain>>> {}
 
-unsafe impl SclPin<I2C2> for PA9<AF4> {}
-unsafe impl SclPin<I2C2> for PF1<AF4> {}
-unsafe impl SclPin<I2C2> for PF6<AF4> {}
+unsafe impl SclPin<I2C1> for PA6<AF3<Output<PushPull>>> {}
+unsafe impl SdaPin<I2C1> for PA7<AF3<Output<OpenDrain>>> {}
 
-// unsafe impl SdaPin<I2C1> for PA14<AF4> {}
-unsafe impl SdaPin<I2C1> for PB7<AF4> {}
-unsafe impl SdaPin<I2C1> for PB9<AF4> {}
+unsafe impl SclPin<I2C2> for PE4<AF3<Output<PushPull>>> {}
+unsafe impl SdaPin<I2C2> for PE5<AF3<Output<OpenDrain>>> {}
 
-unsafe impl SdaPin<I2C2> for PA10<AF4> {}
-unsafe impl SdaPin<I2C2> for PF0<AF4> {}
+unsafe impl SclPin<I2C3> for PD0<AF3<Output<PushPull>>> {}
+unsafe impl SdaPin<I2C3> for PD1<AF3<Output<OpenDrain>>> {}
 
 /// I2C peripheral operating in master mode
 pub struct I2c<I2C, PINS> {
@@ -54,15 +58,20 @@ pub struct I2c<I2C, PINS> {
 }
 
 macro_rules! busy_wait {
-    ($i2c:expr, $flag:ident) => {
+    ($i2c:expr, $flag:ident, $op:ident) => {
         loop {
-            let isr = $i2c.isr.read();
+            let mcs = $i2c.mcs.read();
 
-            if isr.berr().bit_is_set() {
+            if mcs.error().bit_is_set() {
+                if mcs.adrack().bit_is_set() {
+                    return Err(Error::AdrAck);
+                } else if mcs.datack().bit_is_set() {
+                    return Err(Error::DataAck);
+                }
                 return Err(Error::Bus);
-            } else if isr.arlo().bit_is_set() {
+            } else if mcs.arblst().bit_is_set() {
                 return Err(Error::Arbitration);
-            } else if isr.$flag().bit_is_set() {
+            } else if mcs.$flag().$op() {
                 break;
             } else {
                 // try again
@@ -72,7 +81,7 @@ macro_rules! busy_wait {
 }
 
 macro_rules! hal {
-    ($($I2CX:ident: ($i2cX:ident, $i2cXen:ident, $i2cXrst:ident),)+) => {
+    ($($I2CX:ident: ($powerDomain:ident, $i2cX:ident),)+) => {
         $(
             impl<SCL, SDA> I2c<$I2CX, (SCL, SDA)> {
                 /// Configures the I2C peripheral to work in master mode
@@ -80,93 +89,26 @@ macro_rules! hal {
                     i2c: $I2CX,
                     pins: (SCL, SDA),
                     freq: F,
-                    clocks: Clocks,
-                    apb1: &mut APB1,
+                    clocks: &Clocks,
+                    pc: &sysctl::PowerControl,
                 ) -> Self where
                     F: Into<Hertz>,
                     SCL: SclPin<$I2CX>,
                     SDA: SdaPin<$I2CX>,
                 {
-                    apb1.enr().modify(|_, w| w.$i2cXen().enabled());
-                    apb1.rstr().modify(|_, w| w.$i2cXrst().set_bit());
-                    apb1.rstr().modify(|_, w| w.$i2cXrst().clear_bit());
+                    sysctl::control_power(
+                        pc, sysctl::Domain::$powerDomain,
+                        sysctl::RunMode::Run, sysctl::PowerState::On);
+                    sysctl::reset(pc, sysctl::Domain::$powerDomain);
 
+                    // set Master Function Enable, and clear other bits.
+                    i2c.mcr.write(|w| w.mfe().set_bit());
+
+                    // Write TimerPeriod configuration and clear other bits.
                     let freq = freq.into().0;
+                    let tpr = ((clocks.sysclk.0/(2*10*freq))-1) as u8;
 
-                    assert!(freq <= 1_000_000);
-
-                    // TODO review compliance with the timing requirements of I2C
-                    // t_I2CCLK = 1 / PCLK1
-                    // t_PRESC  = (PRESC + 1) * t_I2CCLK
-                    // t_SCLL   = (SCLL + 1) * t_PRESC
-                    // t_SCLH   = (SCLH + 1) * t_PRESC
-                    //
-                    // t_SYNC1 + t_SYNC2 > 4 * t_I2CCLK
-                    // t_SCL ~= t_SYNC1 + t_SYNC2 + t_SCLL + t_SCLH
-                    let i2cclk = clocks.pclk1().0;
-                    let ratio = i2cclk / freq - 4;
-                    let (presc, scll, sclh, sdadel, scldel) = if freq >= 100_000 {
-                        // fast-mode or fast-mode plus
-                        // here we pick SCLL + 1 = 2 * (SCLH + 1)
-                        let presc = ratio / 387;
-
-                        let sclh = ((ratio / (presc + 1)) - 3) / 3;
-                        let scll = 2 * (sclh + 1) - 1;
-
-                        let (sdadel, scldel) = if freq > 400_000 {
-                            // fast-mode plus
-                            let sdadel = 0;
-                            let scldel = i2cclk / 4_000_000 / (presc + 1) - 1;
-
-                            (sdadel, scldel)
-                        } else {
-                            // fast-mode
-                            let sdadel = i2cclk / 8_000_000 / (presc + 1);
-                            let scldel = i2cclk / 2_000_000 / (presc + 1) - 1;
-
-                            (sdadel, scldel)
-                        };
-
-                        (presc, scll, sclh, sdadel, scldel)
-                    } else {
-                        // standard-mode
-                        // here we pick SCLL = SCLH
-                        let presc = ratio / 514;
-
-                        let sclh = ((ratio / (presc + 1)) - 2) / 2;
-                        let scll = sclh;
-
-                        let sdadel = i2cclk / 2_000_000 / (presc + 1);
-                        let scldel = i2cclk / 800_000 / (presc + 1) - 1;
-
-                        (presc, scll, sclh, sdadel, scldel)
-                    };
-
-                    let presc = u8(presc).unwrap();
-                    assert!(presc < 16);
-                    let scldel = u8(scldel).unwrap();
-                    assert!(scldel < 16);
-                    let sdadel = u8(sdadel).unwrap();
-                    assert!(sdadel < 16);
-                    let sclh = u8(sclh).unwrap();
-                    let scll = u8(scll).unwrap();
-
-                    // Configure for "fast mode" (400 KHz)
-                    i2c.timingr.write(|w| unsafe {
-                        w.presc()
-                            .bits(presc)
-                            .scll()
-                            .bits(scll)
-                            .sclh()
-                            .bits(sclh)
-                            .sdadel()
-                            .bits(sdadel)
-                            .scldel()
-                            .bits(scldel)
-                    });
-
-                    // Enable the peripheral
-                    i2c.cr1.write(|w| w.pe().set_bit());
+                    i2c.mtpr.write(|w| unsafe {w.tpr().bits(tpr)});
 
                     I2c { i2c, pins }
                 }
@@ -181,36 +123,108 @@ macro_rules! hal {
                 type Error = Error;
 
                 fn write(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Error> {
-                    // TODO support transfers of more than 255 bytes
-                    assert!(bytes.len() < 256 && bytes.len() > 0);
-
-                    // START and prepare to send `bytes`
-                    self.i2c.cr2.write(|w| {
-                        w.sadd1()
-                            .bits(addr)
-                            .rd_wrn()
-                            .clear_bit()
-                            .nbytes()
-                            .bits(bytes.len() as u8)
-                            .start()
-                            .set_bit()
-                            .autoend()
-                            .set_bit()
+                    // Write Slave address and clear Receive bit
+                    self.i2c.msa.write(|w| unsafe {
+                        w.sa().bits(addr)
                     });
 
-                    for byte in bytes {
-                        // Wait until we are allowed to send data (START has been ACKed or last byte
-                        // when through)
-                        busy_wait!(self.i2c, txis);
+                    // Put first byte in data register
+                    self.i2c.mdr.write(|w| unsafe {
+                        w.data().bits(bytes[0])
+                    });
 
-                        // put byte on the wire
-                        self.i2c.txdr.write(|w| w.txdata().bits(*byte));
+                    let sz = bytes.len();
+
+                    busy_wait!(self.i2c, busbsy, bit_is_clear);
+
+                    // Send START + RUN
+                    // If single byte transfer, set STOP
+                    self.i2c.mcs.write(|w| {
+                        if sz == 1 {
+                            w.stop().set_bit();
+                        }
+                        w.start().set_bit()
+                            .run().set_bit()
+                    });
+
+                    for (i,byte) in (&bytes[1..]).iter().enumerate() {
+                        busy_wait!(self.i2c, busy, bit_is_clear);
+
+                        // Put next byte in data register
+                        self.i2c.mdr.write(|w| unsafe {
+                            w.data().bits(*byte)
+                        });
+
+                        // Send RUN command (Burst continue)
+                        // Set STOP on last byte
+                        self.i2c.mcs.write(|w| {
+                            if (i+1) == (sz-1) {
+                                w.stop().set_bit();
+                            }
+                            w.run().set_bit()
+                        });
                     }
 
-                    // Wait until the last transmission is finished ???
-                    // busy_wait!(self.i2c, busy);
+                    busy_wait!(self.i2c, busy, bit_is_clear);
 
-                    // automatic STOP
+                    Ok(())
+                }
+            }
+
+            impl<PINS> Read for I2c<$I2CX, PINS> {
+                type Error = Error;
+
+                fn read(
+                    &mut self,
+                    addr: u8,
+                    buffer: &mut [u8],
+                ) -> Result<(), Error> {
+
+                    // Write Slave address and set Receive bit
+                    self.i2c.msa.write(|w| unsafe {
+                        w.sa().bits(addr)
+                            .rs().set_bit()
+                    });
+
+                    busy_wait!(self.i2c, busbsy, bit_is_clear);
+                    let recv_sz = buffer.len();
+
+                    if recv_sz == 1 {
+                        // Single receive
+                        self.i2c.mcs.write(|w| {
+                            w.run().set_bit()
+                                .start().set_bit()
+                                .stop().set_bit()
+                        });
+
+                        busy_wait!(self.i2c, busy, bit_is_clear);
+                        buffer[0] = self.i2c.mdr.read().data().bits();
+                    } else {
+                        self.i2c.mcs.write(|w| {
+                            w.start().set_bit()
+                                .run().set_bit()
+                                .ack().set_bit()
+                        });
+
+                        busy_wait!(self.i2c, busy, bit_is_clear);
+                        buffer[0] = self.i2c.mdr.read().data().bits();
+
+                        for byte in &mut buffer[1..recv_sz-1] {
+                            self.i2c.mcs.write(|w| {
+                                w.run().set_bit()
+                                    .ack().set_bit()
+                            });
+                            busy_wait!(self.i2c, busy, bit_is_clear);
+                            *byte = self.i2c.mdr.read().data().bits();
+                        }
+                        self.i2c.mcs.write(|w| {
+                            w.run().set_bit()
+                                .stop().set_bit()
+                        });
+
+                        busy_wait!(self.i2c, busy, bit_is_clear);
+                        buffer[recv_sz-1] = self.i2c.mdr.read().data().bits();
+                    }
 
                     Ok(())
                 }
@@ -225,61 +239,94 @@ macro_rules! hal {
                     bytes: &[u8],
                     buffer: &mut [u8],
                 ) -> Result<(), Error> {
-                    // TODO support transfers of more than 255 bytes
-                    assert!(bytes.len() < 256 && bytes.len() > 0);
-                    assert!(buffer.len() < 256 && buffer.len() > 0);
 
-                    // TODO do we have to explicitly wait here if the bus is busy (e.g. another
-                    // master is communicating)?
+                    let write_len = bytes.len();
 
-                    // START and prepare to send `bytes`
-                    self.i2c.cr2.write(|w| {
-                        w.sadd1()
-                            .bits(addr)
-                            .rd_wrn()
-                            .clear_bit()
-                            .nbytes()
-                            .bits(bytes.len() as u8)
-                            .start()
-                            .set_bit()
-                            .autoend()
-                            .clear_bit()
-                    });
-
-                    for byte in bytes {
-                        // Wait until we are allowed to send data (START has been ACKed or last byte
-                        // when through)
-                        busy_wait!(self.i2c, txis);
-
-                        // put byte on the wire
-                        self.i2c.txdr.write(|w| w.txdata().bits(*byte));
+                    if buffer.len() == 0 {
+                       return self.write(addr, bytes);
                     }
 
-                    // Wait until the last transmission is finished
-                    busy_wait!(self.i2c, tc);
-
-                    // reSTART and prepare to receive bytes into `buffer`
-                    self.i2c.cr2.write(|w| {
-                        w.sadd1()
-                            .bits(addr)
-                            .rd_wrn()
-                            .set_bit()
-                            .nbytes()
-                            .bits(buffer.len() as u8)
-                            .start()
-                            .set_bit()
-                            .autoend()
-                            .set_bit()
-                    });
-
-                    for byte in buffer {
-                        // Wait until we have received something
-                        busy_wait!(self.i2c, rxne);
-
-                        *byte = self.i2c.rxdr.read().rxdata().bits();
+                    if bytes.len() == 0 {
+                        return self.read(addr, buffer);
                     }
 
-                    // automatic STOP
+                    // Write Slave address and clear Receive bit
+                    self.i2c.msa.write(|w| unsafe {
+                        w.sa().bits(addr)
+                    });
+
+                    // send first byte
+                    self.i2c.mdr.write(|w| unsafe {
+                        w.data().bits(bytes[0])
+                    });
+
+                    busy_wait!(self.i2c, busbsy, bit_is_clear);
+
+                    self.i2c.mcs.write(|w| {
+                        w.start().set_bit()
+                            .run().set_bit()
+                    });
+
+                    busy_wait!(self.i2c, busy, bit_is_clear);
+
+                    for byte in (&bytes[1..write_len]).iter() {
+                        self.i2c.mdr.write(|w| unsafe {
+                            w.data().bits(*byte)
+                        });
+
+                        self.i2c.mcs.write(|w| {
+                            w.run().set_bit()
+                        });
+
+                        busy_wait!(self.i2c, busy, bit_is_clear);
+                    }
+
+                    // Write Slave address and set Receive bit
+                    self.i2c.msa.write(|w| unsafe {
+                        w.sa().bits(addr)
+                            .rs().set_bit()
+                    });
+
+                    let recv_sz = buffer.len();
+
+                    if recv_sz == 1 {
+                        // emit Repeated START and STOP for single receive
+                        self.i2c.mcs.write(|w| {
+                            w.run().set_bit()
+                                .start().set_bit()
+                                .stop().set_bit()
+                        });
+
+                        busy_wait!(self.i2c, busy, bit_is_clear);
+                        buffer[0] = self.i2c.mdr.read().data().bits();
+                    } else {
+                        // emit Repeated START
+                        self.i2c.mcs.write(|w| {
+                            w.run().set_bit()
+                                .start().set_bit()
+                                .ack().set_bit()
+                        });
+
+                        busy_wait!(self.i2c, busy, bit_is_clear);
+                        buffer[0] = self.i2c.mdr.read().data().bits();
+
+                        for byte in &mut buffer[1..recv_sz-1] {
+                            self.i2c.mcs.write(|w| {
+                                w.run().set_bit()
+                                    .ack().set_bit()
+                            });
+                            busy_wait!(self.i2c, busy, bit_is_clear);
+                            *byte = self.i2c.mdr.read().data().bits();
+                        }
+
+                        self.i2c.mcs.write(|w| {
+                            w.run().set_bit()
+                                .stop().set_bit()
+                        });
+
+                        busy_wait!(self.i2c, busy, bit_is_clear);
+                        buffer[recv_sz-1] = self.i2c.mdr.read().data().bits();
+                    }
 
                     Ok(())
                 }
@@ -289,6 +336,8 @@ macro_rules! hal {
 }
 
 hal! {
-    I2C1: (i2c1, i2c1en, i2c1rst),
-    I2C2: (i2c2, i2c2en, i2c2rst),
+    I2C0: (I2c0, i2c0),
+    I2C1: (I2c1, i2c1),
+    I2C2: (I2c2, i2c2),
+    I2C3: (I2c3, i2c3),
 }

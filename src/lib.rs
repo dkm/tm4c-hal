@@ -34,7 +34,7 @@ pub extern crate tm4c123x;
 pub mod delay;
 // pub mod flash;
 pub mod gpio;
-// pub mod i2c;
+pub mod i2c;
 // pub mod prelude;
 pub mod sysctl;
 pub mod serial;
