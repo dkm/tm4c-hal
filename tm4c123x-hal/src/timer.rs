@@ -40,11 +40,10 @@ macro_rules! hal {
                     T: Into<Hertz>,
                 {
                     // Disable timer
-                    self.tim.ctl.modify(|r, w| unsafe {
-                        w.bits(r.bits())
-                            .taen().clear_bit()
+                    self.tim.ctl.modify(|_, w| unsafe {
+                        w.taen().clear_bit()
                             .tben().clear_bit()
-                    });
+                    );
                     self.timeout = timeout.into();
 
                     let frequency = self.timeout.0;
@@ -54,9 +53,9 @@ macro_rules! hal {
                     self.tim.tailr.write(|w| unsafe { w.bits(ticks) });
 
                     // // start counter
-                    self.tim.ctl.modify(|r, w| unsafe {
-                        w.bits(r.bits()).taen().set_bit()
-                    });
+                    self.tim.ctl.modify(|_, w|
+                        w.taen().set_bit()
+                    );
                 }
 
                 fn wait(&mut self) -> nb::Result<(), Void> {
@@ -117,7 +116,7 @@ macro_rules! hal {
                     match event {
                         Event::TimeOut => {
                             // Enable update event interrupt
-                            // self.tim.dier.write(|w| w.uie().set_bit());
+                            self.tim.imr.modify(|_,w|  w.tatoim().set_bit());
                         }
                     }
                 }
@@ -127,7 +126,7 @@ macro_rules! hal {
                     match event {
                         Event::TimeOut => {
                             // Enable update event interrupt
-                            // self.tim.dier.write(|w| w.uie().clear_bit());
+                            self.tim.imr.modify(|_,w| w.tatoim().clear_bit());
                         }
                     }
                 }
